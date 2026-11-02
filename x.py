@@ -1,160 +1,605 @@
 #!/usr/bin/env python3
-"""FrameForge: a simple cross-platform stick-animation editor prototype.
-Run with python3 x.py (requires Tkinter)."""
+"""FrameForge - Adobe-inspired stick-animation editor prototype.
+
+Requirements:
+    pip install PyQt6
+
+Run:
+    python x.py
+"""
+
 import json
 import math
-import tkinter as tk
-from tkinter import filedialog, messagebox
+import sys
 from pathlib import Path
 
-BG, PANEL, PANEL2, BORDER, TEXT, MUTED, ACCENT = "#111318", "#191c23", "#20242d", "#303641", "#e8ebf2", "#929baa", "#8c72ff"
-W, H = 960, 540
+from PyQt6.QtCore import QPoint, QPointF, QTimer, Qt
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
 
-def pose(x=.5, y=.52):
-    return {"x": x, "y": y}
+APP_NAME = "FrameForge"
+STAGE_W = 960
+STAGE_H = 540
 
-class FrameForge:
-    def __init__(self, root):
-        self.root = root
-        root.title("FrameForge — Untitled Animation")
-        root.geometry("1200x790")
-        root.minsize(850, 600)
-        root.configure(bg=BG)
-        self.frames = [pose() for _ in range(12)]
-        self.current, self.playing, self.onion, self.path = 0, False, True, None
-        self.drag = None
-        self._ui()
-        self.draw()
-        self.timeline()
-        root.protocol("WM_DELETE_WINDOW", self.close)
 
-    def button(self, parent, text, cmd, active=False):
-        return tk.Button(parent, text=text, command=cmd, bg=ACCENT if active else PANEL2,
-                         fg="white" if active else TEXT, activebackground="#a18cff",
-                         relief="flat", bd=0, padx=10, pady=6, cursor="hand2")
+class Pose:
+    def __init__(self, x=0.5, y=0.52, lean=0.0, arm=0.0, leg=0.0):
+        self.x = x
+        self.y = y
+        self.lean = lean
+        self.arm = arm
+        self.leg = leg
 
-    def _ui(self):
-        head = tk.Frame(self.root, bg="#171a20", height=52); head.pack(fill="x"); head.pack_propagate(False)
-        tk.Label(head, text="✦ FRAMEFORGE", bg="#171a20", fg=TEXT, font=("TkDefaultFont", 13, "bold")).pack(side="left", padx=18)
-        tk.Label(head, text="STICK ANIMATION STUDIO", bg="#171a20", fg=MUTED, font=("TkDefaultFont", 8, "bold")).pack(side="left", padx=8)
-        self.name = tk.Label(head, text="Untitled Animation", bg="#171a20", fg=TEXT); self.name.pack(side="left", padx=20)
-        for label, fn, active in (("New", self.new, False), ("Open", self.open, False), ("Save", self.save, False), ("Export SVG", self.export, True)):
-            self.button(head, label, fn, active).pack(side="right", padx=4, pady=8)
-        area = tk.Frame(self.root, bg=BG); area.pack(fill="both", expand=True, padx=12, pady=12)
-        rail = tk.Frame(area, bg=PANEL, width=60); rail.pack(side="left", fill="y"); rail.pack_propagate(False)
-        tk.Label(rail, text="TOOLS", bg=PANEL, fg=MUTED, font=("TkDefaultFont", 8, "bold")).pack(pady=14)
-        self.button(rail, "↖", lambda: None, True).pack(padx=8, pady=4)
-        self.button(rail, "＋", self.add).pack(padx=8, pady=4)
-        self.onion_btn = self.button(rail, "◉", self.toggle_onion); self.onion_btn.pack(padx=8, pady=4)
-        center = tk.Frame(area, bg=BG); center.pack(side="left", fill="both", expand=True, padx=10)
-        top = tk.Frame(center, bg=BG); top.pack(fill="x", pady=(0, 7))
-        tk.Label(top, text="STAGE", bg=BG, fg=TEXT, font=("TkDefaultFont", 10, "bold")).pack(side="left")
-        self.frame_label = tk.Label(top, text="Frame 1 / 12", bg=BG, fg=MUTED); self.frame_label.pack(side="right")
-        self.canvas = tk.Canvas(center, bg="#252a33", highlightthickness=1, highlightbackground=BORDER)
-        self.canvas.pack(fill="both", expand=True)
-        self.canvas.bind("<Configure>", lambda e: self.draw())
-        self.canvas.bind("<ButtonPress-1>", self.start_drag); self.canvas.bind("<B1-Motion>", self.move_drag); self.canvas.bind("<ButtonRelease-1>", self.end_drag)
-        props = tk.Frame(area, bg=PANEL, width=175); props.pack(side="right", fill="y"); props.pack_propagate(False)
-        tk.Label(props, text="PROPERTIES", bg=PANEL, fg=TEXT, font=("TkDefaultFont", 10, "bold")).pack(anchor="w", padx=14, pady=16)
-        for title, value in (("DOCUMENT", ""), ("Stage", "960 × 540"), ("Frame rate", "12 fps"), ("SELECTED FRAME", "")):
-            tk.Label(props, text=title, bg=PANEL, fg=MUTED if not value else TEXT, font=("TkDefaultFont", 9, "bold" if not value else "TkDefaultFont")).pack(anchor="w", padx=14, pady=(8, 2))
-            if value: tk.Label(props, text=value, bg=PANEL, fg=TEXT).pack(anchor="w", padx=14)
-        self.position = tk.Label(props, text="Position 50%, 52%", bg=PANEL, fg=TEXT); self.position.pack(anchor="w", padx=14, pady=12)
-        tk.Label(props, text="Drag the stick figure to pose it. Add or duplicate frames to create motion.", wraplength=145, justify="left", bg=PANEL, fg=MUTED).pack(anchor="w", padx=14, pady=10)
-        timeline = tk.Frame(self.root, bg=PANEL, height=160); timeline.pack(fill="x", padx=12, pady=(0, 12)); timeline.pack_propagate(False)
-        bar = tk.Frame(timeline, bg=PANEL); bar.pack(fill="x", padx=12, pady=10)
-        tk.Label(bar, text="TIMELINE", bg=PANEL, fg=TEXT, font=("TkDefaultFont", 10, "bold")).pack(side="left")
-        self.button(bar, "＋ Frame", self.add, True).pack(side="left", padx=(14, 4))
-        self.button(bar, "Duplicate", self.duplicate).pack(side="left", padx=4)
-        self.button(bar, "Delete", self.delete).pack(side="left", padx=4)
-        self.play_btn = self.button(bar, "▶ Play", self.toggle_play, True); self.play_btn.pack(side="right")
-        self.strip = tk.Frame(timeline, bg=PANEL); self.strip.pack(fill="x", padx=12)
-        self.status = tk.Label(timeline, text="Ready · Drag the figure to pose this frame", bg=PANEL, fg=MUTED); self.status.pack(side="right", padx=14, pady=8)
+    def to_dict(self):
+        return {
+            "x": self.x,
+            "y": self.y,
+            "lean": self.lean,
+            "arm": self.arm,
+            "leg": self.leg,
+        }
 
-    def box(self):
-        cw, ch = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
-        scale = min((cw-24)/W, (ch-24)/H); sw, sh = W*scale, H*scale
-        return (cw-sw)/2, (ch-sh)/2, sw, sh
 
-    def draw(self):
-        if not hasattr(self, "canvas"): return
-        c = self.canvas; c.delete("all"); ox, oy, sw, sh = self.box()
-        c.create_rectangle(ox, oy, ox+sw, oy+sh, fill="#f7f8fb", outline="")
-        for x in range(0, W+1, 48): c.create_line(ox+sw*x/W, oy, ox+sw*x/W, oy+sh, fill="#edf0f5")
-        for y in range(0, H+1, 48): c.create_line(ox, oy+sh*y/H, ox+sw, oy+sh*y/H, fill="#edf0f5")
-        c.create_line(ox, oy+sh*.83, ox+sw, oy+sh*.83, fill="#cfd5df", width=2)
-        if self.onion and len(self.frames)>1 and not self.playing: self.figure(self.frames[(self.current-1)%len(self.frames)], ox, oy, sw, sh, "#9ba9db")
-        self.figure(self.frames[self.current], ox, oy, sw, sh, "#252b38")
-        f=self.frames[self.current]; self.position.config(text=f"Position {round(f['x']*100)}%, {round(f['y']*100)}%")
-        self.frame_label.config(text=f"Frame {self.current+1} / {len(self.frames)}")
+class StageWidget(QWidget):
+    def __init__(self, parent):
+        super().__init__()
+        self.parent = parent
+        self.dragging = False
+        self.drag_offset = QPointF(0, 0)
+        self.setMouseTracking(True)
 
-    def figure(self, f, ox, oy, sw, sh, color):
-        x,y=ox+f["x"]*sw,oy+f["y"]*sh; s=min(sw/W,sh/H); c=self.canvas
-        c.create_oval(x-20*s,y-105*s,x+20*s,y-65*s,outline=color,width=max(2,4*s),fill="#f7f8fb")
-        def line(a,b,d,e,width=5): c.create_line(a,b,d,e,fill=color,width=max(1,width*s),capstyle=tk.ROUND)
-        line(x,y-54*s,x,y+15*s)
-        for side in (-1,1):
-            line(x,y-54*s,x+side*28*s,y-20*s,4); line(x+side*28*s,y-20*s,x+side*49*s,y+5*s,4)
-            line(x,y+15*s,x+side*18*s,y+58*s); line(x+side*18*s,y+58*s,x+side*32*s,y+105*s)
+    def _map_to_stage(self, pos):
+        rect = self.rect()
+        padding = 18
+        w = max(1, rect.width() - padding * 2)
+        h = max(1, rect.height() - padding * 2)
+        scale = min(w / STAGE_W, h / STAGE_H)
+        stage_w = STAGE_W * scale
+        stage_h = STAGE_H * scale
+        offset_x = (rect.width() - stage_w) / 2
+        offset_y = (rect.height() - stage_h) / 2
+        sx = (pos.x() - offset_x) / scale
+        sy = (pos.y() - offset_y) / scale
+        return QPointF(sx, sy), (offset_x, offset_y, scale)
 
-    def timeline(self):
-        for w in self.strip.winfo_children(): w.destroy()
-        cv=tk.Canvas(self.strip,height=47,bg=PANEL,highlightthickness=0); sb=tk.Scrollbar(self.strip,orient="horizontal",command=cv.xview); cv.configure(xscrollcommand=sb.set); cv.pack(fill="x"); sb.pack(fill="x")
-        inner=tk.Frame(cv,bg=PANEL); cv.create_window((0,0),window=inner,anchor="nw")
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pose = self.parent.frames[self.parent.current]
+        p, _ = self._map_to_stage(event.pos())
+        x = pose.x * STAGE_W
+        y = pose.y * STAGE_H
+        if math.hypot(p.x() - x, p.y() - y) < 80:
+            self.dragging = True
+            self.drag_offset = QPointF(p.x() - x, p.y() - y)
+
+    def mouseMoveEvent(self, event):
+        if not self.dragging:
+            return
+        p, _ = self._map_to_stage(event.pos())
+        pose = self.parent.frames[self.parent.current]
+        pose.x = max(0.04, min(0.96, (p.x() - self.drag_offset.x()) / STAGE_W))
+        pose.y = max(0.18, min(0.82, (p.y() - self.drag_offset.y()) / STAGE_H))
+        self.parent.update_properties()
+        self.parent.update_scene()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.dragging = False
+            self.parent.status.setText("Pose updated · Save to keep your changes")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = self.rect()
+        painter.fillRect(rect, QColor("#f4f6fb"))
+
+        padding = 18
+        w = max(1, rect.width() - padding * 2)
+        h = max(1, rect.height() - padding * 2)
+        scale = min(w / STAGE_W, h / STAGE_H)
+        stage_w = STAGE_W * scale
+        stage_h = STAGE_H * scale
+        offset_x = (rect.width() - stage_w) / 2
+        offset_y = (rect.height() - stage_h) / 2
+
+        # stage background
+        painter.fillRect(
+            offset_x,
+            offset_y,
+            stage_w,
+            stage_h,
+            QColor("#f8f9fb"),
+        )
+
+        # grid
+        grid_color = QColor("#e5eaf3")
+        pen = QPen(grid_color, 1)
+        painter.setPen(pen)
+        for gx in range(0, STAGE_W + 1, 48):
+            x = offset_x + gx * scale
+            painter.drawLine(int(x), int(offset_y), int(x), int(offset_y + stage_h))
+        for gy in range(0, STAGE_H + 1, 48):
+            y = offset_y + gy * scale
+            painter.drawLine(int(offset_x), int(y), int(offset_x + stage_w), int(y))
+
+        # floor line
+        painter.setPen(QPen(QColor("#cfd7e5"), 2))
+        painter.drawLine(
+            int(offset_x),
+            int(offset_y + 0.83 * stage_h),
+            int(offset_x + stage_w),
+            int(offset_y + 0.83 * stage_h),
+        )
+
+        if self.parent.onion and len(self.parent.frames) > 1 and not self.parent.playing:
+            prev = self.parent.frames[(self.parent.current - 1) % len(self.parent.frames)]
+            self._draw_figure(painter, prev, offset_x, offset_y, scale, QColor("#a0aeff"), ghost=True)
+
+        self._draw_figure(painter, self.parent.frames[self.parent.current], offset_x, offset_y, scale, QColor("#252b38"), ghost=False)
+
+        # stage label
+        painter.setPen(QPen(QColor("#9aa5b5"), 1))
+        painter.setFont(QFont("Sans Serif", 8))
+        painter.drawText(int(offset_x + 12), int(offset_y + 18), "960 × 540")
+
+    def _draw_figure(self, painter, pose, offset_x, offset_y, scale, color, ghost=False):
+        x = offset_x + pose.x * STAGE_W * scale
+        y = offset_y + pose.y * STAGE_H * scale
+        s = scale
+
+        head_r = 20 * s
+        painter.setPen(QPen(color, max(2, int(4 * s))))
+        painter.setBrush(QColor("#f8f9fb"))
+        painter.drawEllipse(int(x - head_r), int(y - 105 * s), int(head_r * 2), int(head_r * 2))
+
+        shoulder_x = x + pose.lean * 10 * s
+        shoulder_y = y - 54 * s
+        hip_x = x
+        hip_y = y + 15 * s
+
+        painter.setPen(QPen(color, max(1, int(5 * s))))
+        painter.drawLine(int(x), int(y - 54 * s), int(hip_x), int(hip_y))
+
+        for side in (-1, 1):
+            arm = (-0.75 if side < 0 else 0.75) + pose.arm
+            elbow_x = shoulder_x + math.sin(arm) * 34 * s
+            elbow_y = shoulder_y + math.cos(arm) * 34 * s
+            hand_x = shoulder_x + math.sin(arm) * 67 * s
+            hand_y = shoulder_y + math.cos(arm) * 67 * s
+            painter.drawLine(int(shoulder_x), int(shoulder_y), int(elbow_x), int(elbow_y))
+            painter.drawLine(int(elbow_x), int(elbow_y), int(hand_x), int(hand_y))
+
+            leg = (0.50 if side < 0 else -0.50) + pose.leg
+            knee_x = hip_x + side * 17 * s + math.sin(leg) * 35 * s
+            knee_y = hip_y + 43 * s
+            foot_x = hip_x + side * 20 * s + math.sin(leg) * 62 * s
+            foot_y = hip_y + 90 * s
+            painter.drawLine(int(hip_x), int(hip_y), int(knee_x), int(knee_y))
+            painter.drawLine(int(knee_x), int(knee_y), int(foot_x), int(foot_y))
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("FrameForge — Untitled Animation")
+        self.resize(1280, 820)
+        self.frames = [Pose() for _ in range(12)]
+        self.current = 0
+        self.onion = True
+        self.playing = False
+        self.project_path = None
+        self.dragging = False
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.play_next_frame)
+
+        self._build_ui()
+        self.update_scene()
+        self.refresh_timeline()
+
+    def _build_ui(self):
+        # Header
+        header = QWidget()
+        header.setFixedHeight(56)
+        header.setStyleSheet("background:#171b22; color:#e9edf7; border:1px solid #2f3542;")
+        hlay = QHBoxLayout(header)
+        hlay.setContentsMargins(16, 8, 16, 8)
+        logo = QLabel("✦ FRAMEFORGE")
+        logo.setStyleSheet("font-weight:700; font-size:14px;")
+        hlay.addWidget(logo)
+        brand = QLabel("STICK ANIMATION STUDIO")
+        brand.setStyleSheet("color:#9ca6b5; font-size:8px; font-weight:700; letter-spacing:1px;")
+        hlay.addWidget(brand)
+        spacer = QWidget(); spacer.setSizePolicy(1, 1)
+        hlay.addWidget(spacer)
+        self.project_name = QLabel("Untitled Animation")
+        hlay.addWidget(self.project_name)
+        self.new_btn = QPushButton("New")
+        self.open_btn = QPushButton("Open")
+        self.save_btn = QPushButton("Save")
+        self.export_btn = QPushButton("Export SVG")
+        self.export_btn.setStyleSheet("background:#8d76ff; color:white; border:none; padding:8px 16px; border-radius:10px;")
+        for btn in (self.new_btn, self.open_btn, self.save_btn, self.export_btn):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet("background:#20242d; color:#edf0f6; border:1px solid #303642; border-radius:10px; padding:8px 14px;")
+        self.new_btn.clicked.connect(self.new_project)
+        self.open_btn.clicked.connect(self.open_project)
+        self.save_btn.clicked.connect(self.save_project)
+        self.export_btn.clicked.connect(self.export_svg)
+        hlay.addWidget(self.new_btn)
+        hlay.addWidget(self.open_btn)
+        hlay.addWidget(self.save_btn)
+        hlay.addWidget(self.export_btn)
+
+        self.setCentralWidget(QWidget())
+        root = self.centralWidget()
+        root.setStyleSheet("background:#111318; color:#e9edf7;")
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+        layout.addWidget(header)
+
+        content = QWidget()
+        content.setStyleSheet("background:#111318;")
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+
+        # left tool rail
+        left = QWidget()
+        left.setFixedWidth(72)
+        left.setStyleSheet("background:#191c23; border:1px solid #2f3542; border-radius:10px;")
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(8, 12, 8, 12)
+        left_title = QLabel("TOOLS")
+        left_title.setStyleSheet("color:#9ca6b5; font-size:8px; font-weight:700; letter-spacing:1px;")
+        left_layout.addWidget(left_title, 0, Qt.AlignmentFlag.AlignHCenter)
+        left_layout.addStretch(1)
+        for label, callback in (("↖", lambda: None), ("＋", self.add_frame), ("◉", self.toggle_onion)):
+            btn = QPushButton(label)
+            btn.setFixedSize(42, 42)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet("background:#20242d; border:1px solid #323947; color:#edf0f6; border-radius:10px; font-size:16px; font-weight:700;")
+            if label == "◉":
+                self.onion_btn = btn
+            btn.clicked.connect(callback)
+            left_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        left_layout.addStretch(2)
+        content_layout.addWidget(left)
+
+        # center stage
+        stage_wrap = QWidget()
+        stage_wrap.setStyleSheet("background:#111318;")
+        stage_layout = QVBoxLayout(stage_wrap)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
+        stage_layout.setSpacing(6)
+
+        stage_header = QWidget(); stage_header.setFixedHeight(28)
+        stage_header.setStyleSheet("background:#111318;")
+        stage_head_l = QHBoxLayout(stage_header)
+        stage_head_l.setContentsMargins(0, 0, 0, 0)
+        stage_label = QLabel("STAGE")
+        stage_label.setStyleSheet("color:#edf0f6; font-size:10px; font-weight:700;")
+        stage_head_l.addWidget(stage_label)
+        self.frame_counter = QLabel("Frame 1 / 12")
+        self.frame_counter.setStyleSheet("color:#9ca6b5; font-size:9px;")
+        stage_head_l.addWidget(self.frame_counter, 0, Qt.AlignmentFlag.AlignRight)
+        stage_layout.addWidget(stage_header)
+
+        self.stage = StageWidget(self)
+        self.stage.setStyleSheet("background:#252a33; border:1px solid #313b4d; border-radius:10px;")
+        stage_layout.addWidget(self.stage)
+
+        content_layout.addWidget(stage_wrap, 1)
+
+        # properties
+        props = QWidget()
+        props.setFixedWidth(210)
+        props.setStyleSheet("background:#191c23; border:1px solid #2f3542; border-radius:10px;")
+        props_layout = QVBoxLayout(props)
+        props_layout.setContentsMargins(14, 14, 14, 14)
+        props_layout.setSpacing(8)
+
+        title = QLabel("PROPERTIES")
+        title.setStyleSheet("color:#edf0f6; font-size:10px; font-weight:700;")
+        props_layout.addWidget(title)
+
+        for label, value in (("Stage", "960 × 540"), ("Frame rate", "12 fps")):
+            row = QWidget(); row.setStyleSheet("background:transparent;")
+            rlay = QHBoxLayout(row); rlay.setContentsMargins(0, 0, 0, 0)
+            lab = QLabel(label); lab.setStyleSheet("color:#9ca6b5; font-size:9px;")
+            val = QLabel(value); val.setStyleSheet("color:#edf0f6; font-size:9px;")
+            rlay.addWidget(lab); rlay.addWidget(val, 0, Qt.AlignmentFlag.AlignRight)
+            props_layout.addWidget(row)
+
+        props_layout.addWidget(QLabel(""))
+        self.position_label = QLabel("Position 50%, 52%")
+        self.position_label.setStyleSheet("color:#edf0f6; font-size:9px;")
+        props_layout.addWidget(self.position_label)
+
+        self.lean_slider = self._make_slider("Lean", -100, 100, 0)
+        self.arm_slider = self._make_slider("Arm", -100, 100, 0)
+        self.leg_slider = self._make_slider("Leg", -100, 100, 0)
+        props_layout.addWidget(self.lean_slider)
+        props_layout.addWidget(self.arm_slider)
+        props_layout.addWidget(self.leg_slider)
+
+        info = QLabel(
+            "Drag the figure to pose it, add frames, and preview the motion.\n\nEach frame is a pose; the timeline controls playback."
+        )
+        info.setStyleSheet("color:#9ca6b5; font-size:9px; line-height:1.4;")
+        info.setWordWrap(True)
+        props_layout.addWidget(info)
+        content_layout.addWidget(props)
+
+        layout.addWidget(content)
+
+        # timeline
+        timeline = QWidget()
+        timeline.setFixedHeight(170)
+        timeline.setStyleSheet("background:#191c23; border:1px solid #2f3542; border-radius:10px;")
+        tl_layout = QVBoxLayout(timeline)
+        tl_layout.setContentsMargins(12, 10, 12, 10)
+
+        tl_top = QWidget(); tl_top.setStyleSheet("background:transparent;")
+        tlay = QHBoxLayout(tl_top); tlay.setContentsMargins(0, 0, 0, 0)
+        tlabel = QLabel("TIMELINE"); tlabel.setStyleSheet("color:#edf0f6; font-size:10px; font-weight:700;")
+        tlay.addWidget(tlabel)
+        tlay.addStretch(1)
+        add_tb = QPushButton("＋ Frame")
+        dup_tb = QPushButton("Duplicate")
+        del_tb = QPushButton("Delete")
+        play_tb = QPushButton("▶ Play")
+        for btn in (add_tb, dup_tb, del_tb, play_tb):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet("background:#20242d; color:#edf0f6; border:1px solid #303642; border-radius:10px; padding:6px 12px;")
+        add_tb.clicked.connect(self.add_frame)
+        dup_tb.clicked.connect(self.duplicate_frame)
+        del_tb.clicked.connect(self.delete_frame)
+        play_tb.clicked.connect(self.toggle_play)
+        self.play_btn = play_tb
+        tlay.addWidget(add_tb); tlay.addWidget(dup_tb); tlay.addWidget(del_tb); tlay.addWidget(play_tb)
+        tl_layout.addWidget(tl_top)
+
+        self.timeline_area = QWidget(); self.timeline_area.setStyleSheet("background:transparent;")
+        self.timeline_layout = QHBoxLayout(self.timeline_area)
+        self.timeline_layout.setContentsMargins(0, 0, 0, 0)
+        self.timeline_layout.setSpacing(6)
+        tl_layout.addWidget(self.timeline_area)
+
+        footer = QWidget(); footer.setStyleSheet("background:transparent;")
+        fly = QHBoxLayout(footer); fly.setContentsMargins(0, 0, 0, 0)
+        fly.addWidget(QLabel("12 fps"))
+        self.status = QLabel("Ready · Drag the figure to pose this frame")
+        self.status.setStyleSheet("color:#9ca6b5; font-size:9px;")
+        self.status.setAlignment(Qt.AlignmentFlag.AlignRight)
+        fly.addWidget(self.status)
+        tl_layout.addWidget(footer)
+        layout.addWidget(timeline)
+
+        # connect sliders
+        self.lean_slider.valueChanged.connect(lambda v: self.set_pose_value("lean", v / 100.0))
+        self.arm_slider.valueChanged.connect(lambda v: self.set_pose_value("arm", v / 100.0))
+        self.leg_slider.valueChanged.connect(lambda v: self.set_pose_value("leg", v / 100.0))
+
+    def _make_slider(self, title, minimum, maximum, default):
+        wrapper = QWidget(); wrapper.setStyleSheet("background:transparent;")
+        wlay = QVBoxLayout(wrapper); wlay.setContentsMargins(0, 0, 0, 0)
+        label = QLabel(title); label.setStyleSheet("color:#9ca6b5; font-size:9px;")
+        wlay.addWidget(label)
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(minimum, maximum)
+        slider.setValue(default)
+        slider.setStyleSheet("QSlider::groove:horizontal {background:#2a2f39; height:4px; border-radius:2px;} QSlider::handle:horizontal {background:#8d76ff; width:12px; height:12px; border-radius:6px; margin:-4px 0;}" )
+        wlay.addWidget(slider)
+        return wrapper
+
+    def set_pose_value(self, key, value):
+        p = self.frames[self.current]
+        setattr(p, key, value)
+        self.update_scene()
+
+    def update_properties(self):
+        pose = self.frames[self.current]
+        self.position_label.setText(f"Position {round(pose.x * 100)}%, {round(pose.y * 100)}%")
+        self.lean_slider.setValue(int(round(pose.lean * 100)))
+        self.arm_slider.setValue(int(round(pose.arm * 100)))
+        self.leg_slider.setValue(int(round(pose.leg * 100)))
+
+    def update_scene(self):
+        self.frame_counter.setText(f"Frame {self.current + 1} / {len(self.frames)}")
+        self.update_properties()
+        self.stage.update()
+
+    def refresh_timeline(self):
+        for i in reversed(range(self.timeline_layout.count())):
+            widget = self.timeline_layout.itemAt(i).widget()
+            if widget is not None:
+                widget.deleteLater()
         for i in range(len(self.frames)):
-            tk.Button(inner,text=f"{i+1:02d}  ●",command=lambda n=i:self.select(n),bg="#3a315f" if i==self.current else PANEL2,fg="#c9bdff" if i==self.current else MUTED,relief="flat",bd=0,width=8,height=2).pack(side="left",padx=(0,5))
-        inner.update_idletasks(); cv.configure(scrollregion=cv.bbox("all"))
+            btn = QPushButton(f"{i + 1:02d}\n●")
+            btn.setFixedSize(64, 40)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "background:#2b3040; color:#c9bdff; border:1px solid #3a4154; border-radius:8px; font-size:10px; font-weight:700;"
+                if i == self.current else
+                "background:#1d2129; color:#9ca6b5; border:1px solid #2a2f3a; border-radius:8px; font-size:10px;"
+            )
+            btn.clicked.connect(lambda _, index=i: self.select_frame(index))
+            self.timeline_layout.addWidget(btn)
 
-    def select(self,i): self.current=max(0,min(i,len(self.frames)-1)); self.timeline(); self.draw()
-    def add(self): self.frames.insert(self.current+1,dict(self.frames[self.current])); self.select(self.current+1); self.status.config(text="Frame added")
-    def duplicate(self): self.add(); self.status.config(text="Frame duplicated")
-    def delete(self):
-        if len(self.frames)>1: del self.frames[self.current]; self.select(min(self.current,len(self.frames)-1)); self.status.config(text="Frame deleted")
-        else: self.status.config(text="Keep at least one frame")
-    def toggle_onion(self): self.onion=not self.onion; self.onion_btn.config(bg=ACCENT if self.onion else PANEL2); self.draw()
-    def start_drag(self,e):
-        ox,oy,sw,sh=self.box(); f=self.frames[self.current]; x,y=ox+f["x"]*sw,oy+f["y"]*sh
-        if math.hypot(e.x-x,e.y-y)<100*min(sw/W,sh/H): self.drag=(e.x,e.y,f["x"],f["y"])
-    def move_drag(self,e):
-        if self.drag:
-            ox,oy,sw,sh=self.box(); sx,sy,x,y=self.drag; f=self.frames[self.current]
-            f["x"]=min(.96,max(.04,x+(e.x-sx)/sw)); f["y"]=min(.78,max(.18,y+(e.y-sy)/sh)); self.draw()
-    def end_drag(self,e):
-        if self.drag: self.drag=None; self.status.config(text="Pose updated · Save to keep changes")
+    def select_frame(self, index):
+        self.current = max(0, min(index, len(self.frames) - 1))
+        self.refresh_timeline()
+        self.update_scene()
+
+    def add_frame(self):
+        source = self.frames[self.current]
+        clone = Pose(source.x, source.y, source.lean, source.arm, source.leg)
+        self.frames.insert(self.current + 1, clone)
+        self.current += 1
+        self.refresh_timeline()
+        self.update_scene()
+        self.status.setText("Frame added")
+
+    def duplicate_frame(self):
+        self.add_frame()
+        self.status.setText("Frame duplicated")
+
+    def delete_frame(self):
+        if len(self.frames) <= 1:
+            self.status.setText("At least one frame is required")
+            return
+        del self.frames[self.current]
+        self.current = max(0, min(self.current, len(self.frames) - 1))
+        self.refresh_timeline()
+        self.update_scene()
+        self.status.setText("Frame deleted")
+
+    def toggle_onion(self):
+        self.onion = not self.onion
+        self.onion_btn.setStyleSheet(
+            "background:#8d76ff; color:#ffffff; border:1px solid #8d76ff; border-radius:10px; font-size:16px; font-weight:700;"
+            if self.onion else
+            "background:#20242d; color:#edf0f6; border:1px solid #323947; border-radius:10px; font-size:16px; font-weight:700;"
+        )
+        self.stage.update()
+
     def toggle_play(self):
-        self.playing=not self.playing; self.play_btn.config(text="❚❚ Pause" if self.playing else "▶ Play")
-        if self.playing: self.step()
-        elif hasattr(self,"timer"): self.root.after_cancel(self.timer)
-        self.draw()
-    def step(self):
-        if self.playing: self.current=(self.current+1)%len(self.frames); self.timeline(); self.draw(); self.timer=self.root.after(83,self.step)
-    def new(self):
-        if messagebox.askyesno("FrameForge","Start a new animation? Unsaved changes will be lost."):
-            self.frames=[pose() for _ in range(12)]; self.current=0; self.path=None; self.name.config(text="Untitled Animation"); self.timeline(); self.draw()
-    def save(self):
-        path=self.path or filedialog.asksaveasfilename(defaultextension=".frameforge",filetypes=[("FrameForge project","*.frameforge"),("JSON","*.json")])
-        if path:
-            try:
-                Path(path).write_text(json.dumps({"format":"frameforge","version":1,"fps":12,"frames":self.frames},indent=2),encoding="utf-8"); self.path=path; self.name.config(text=Path(path).stem); self.status.config(text=f"Saved {Path(path).name}")
-            except OSError as e: messagebox.showerror("Save failed",str(e))
-    def open(self):
-        path=filedialog.askopenfilename(filetypes=[("FrameForge project","*.frameforge *.json"),("All files","*.*")])
-        if path:
-            try:
-                data=json.loads(Path(path).read_text(encoding="utf-8")); frames=data["frames"]
-                if not isinstance(frames,list) or not frames: raise ValueError("Project has no frames")
-                self.frames=[{"x":float(f.get("x",.5)),"y":float(f.get("y",.52))} for f in frames]; self.current=0; self.path=path; self.name.config(text=Path(path).stem); self.timeline(); self.draw(); self.status.config(text=f"Opened {Path(path).name}")
-            except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError) as e: messagebox.showerror("Could not open project",str(e))
-    def export(self):
-        path=filedialog.asksaveasfilename(defaultextension=".svg",filetypes=[("SVG image","*.svg")])
-        if not path:return
-        x,y=self.frames[self.current]["x"]*W,self.frames[self.current]["y"]*H
-        svg=f'''<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}"><rect width="100%" height="100%" fill="#f7f8fb"/><g stroke="#252b38" stroke-width="5" stroke-linecap="round" fill="none"><circle cx="{x}" cy="{y-85}" r="20"/><path d="M{x} {y-54}V{y+15} M{x} {y-54}l-28 34-21 25 M{x} {y-54}l28 34 21 25 M{x} {y+15}l-18 43-14 47 M{x} {y+15}l18 43 14 47"/></g></svg>'''
-        try: Path(path).write_text(svg,encoding="utf-8"); self.status.config(text=f"Exported {Path(path).name}")
-        except OSError as e: messagebox.showerror("Export failed",str(e))
-    def close(self):
-        if self.playing and hasattr(self,"timer"): self.root.after_cancel(self.timer)
-        self.root.destroy()
+        self.playing = not self.playing
+        self.play_btn.setText("❚❚ Pause" if self.playing else "▶ Play")
+        if self.playing:
+            self.timer.start(83)
+            self.status.setText("Playback running")
+        else:
+            self.timer.stop()
+            self.status.setText("Playback paused")
+        self.stage.update()
+
+    def play_next_frame(self):
+        if not self.playing:
+            return
+        self.current = (self.current + 1) % len(self.frames)
+        self.refresh_timeline()
+        self.update_scene()
+
+    def new_project(self):
+        reply = QMessageBox.question(
+            self,
+            APP_NAME,
+            "Start a new animation? Unsaved changes will be lost.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.frames = [Pose() for _ in range(12)]
+        self.current = 0
+        self.project_path = None
+        self.project_name.setText("Untitled Animation")
+        self.refresh_timeline()
+        self.update_scene()
+
+    def save_project(self):
+        path = self.project_path or QFileDialog.getSaveFileName(
+            self,
+            "Save animation",
+            str(Path.home()),
+            "FrameForge project (*.frameforge);;JSON (*.json)",
+        )[0]
+        if not path:
+            return
+        data = {
+            "format": "frameforge",
+            "version": 1,
+            "fps": 12,
+            "frames": [p.to_dict() for p in self.frames],
+        }
+        try:
+            Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
+            self.project_path = path
+            self.project_name.setText(Path(path).stem)
+            self.status.setText(f"Saved {Path(path).name}")
+        except OSError as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+
+    def open_project(self):
+        path = QFileDialog.getOpenFileName(
+            self,
+            "Open animation",
+            str(Path.home()),
+            "FrameForge project (*.frameforge *.json);;All files (*.*)",
+        )[0]
+        if not path:
+            return
+        try:
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))
+            frames = raw.get("frames", [])
+            if not frames:
+                raise ValueError("Project contains no frames")
+            self.frames = []
+            for item in frames:
+                self.frames.append(
+                    Pose(
+                        x=float(item.get("x", 0.5)),
+                        y=float(item.get("y", 0.52)),
+                        lean=float(item.get("lean", 0.0)),
+                        arm=float(item.get("arm", 0.0)),
+                        leg=float(item.get("leg", 0.0)),
+                    )
+                )
+            self.current = 0
+            self.project_path = path
+            self.project_name.setText(Path(path).stem)
+            self.refresh_timeline(); self.update_scene(); self.status.setText(f"Opened {Path(path).name}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not open project", str(exc))
+
+    def export_svg(self):
+        path = QFileDialog.getSaveFileName(self, "Export current frame as SVG", str(Path.home()), "SVG (*.svg)")[0]
+        if not path:
+            return
+        pose = self.frames[self.current]
+        x = pose.x * STAGE_W
+        y = pose.y * STAGE_H
+        svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{STAGE_W}" height="{STAGE_H}" viewBox="0 0 {STAGE_W} {STAGE_H}">
+<rect width="100%" height="100%" fill="#f7f8fb"/>
+<g stroke="#252b38" stroke-width="5" stroke-linecap="round" fill="none">
+<circle cx="{x:.1f}" cy="{y-85:.1f}" r="20"/>
+<path d="M {x:.1f} {y-54:.1f} L {x:.1f} {y+15:.1f}"/>
+<path d="M {x:.1f} {y-54:.1f} L {x-28:.1f} {y-20:.1f} L {x-49:.1f} {y+5:.1f}"/>
+<path d="M {x:.1f} {y-54:.1f} L {x+28:.1f} {y-20:.1f} L {x+49:.1f} {y+5:.1f}"/>
+<path d="M {x:.1f} {y+15:.1f} L {x-18:.1f} {y+58:.1f} L {x-32:.1f} {y+105:.1f}"/>
+<path d="M {x:.1f} {y+15:.1f} L {x+18:.1f} {y+58:.1f} L {x+32:.1f} {y+105:.1f}"/>
+</g>
+</svg>'''
+        try:
+            Path(path).write_text(svg, encoding="utf-8")
+            self.status.setText(f"Exported {Path(path).name}")
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
 
 if __name__ == "__main__":
-    root=tk.Tk(); FrameForge(root); root.mainloop()
+    main()
